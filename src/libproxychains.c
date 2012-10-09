@@ -196,6 +196,7 @@ static void get_chain_data(proxy_data * pd, unsigned int *proxy_count, chain_typ
 				memset(&pd[count], 0, sizeof(proxy_data));
 
 				pd[count].ps = PLAY_STATE;
+				pd[count].fixed = 1;
 				port_n = 0;
 
 				sscanf(buff, "%s %s %d %s %s", type, host, &port_n, pd[count].user, pd[count].pass);
@@ -209,11 +210,19 @@ static void get_chain_data(proxy_data * pd, unsigned int *proxy_count, chain_typ
 					pd[count].pt = SOCKS4_TYPE;
 				} else if(!strcmp(type, "socks5")) {
 					pd[count].pt = SOCKS5_TYPE;
-				} else
+				} else if(!strcmp(type,"extern")) {
+					pd[count].pt = EXTERN_TYPE;
+					pd[count].fixed = 0;
+					pd[count].filled = 0;
+					strcpy(pd[count].program, host);
+				}
+				else
 					continue;
 
-				if(pd[count].ip.as_int && port_n && pd[count].ip.as_int != (uint32_t) - 1)
+				if((pd[count].ip.as_int && port_n && pd[count].ip.as_int != (uint32_t) - 1)
+						|| pd[count].pt == EXTERN_TYPE)
 					count++;
+
 			} else {
 				if(strstr(buff, "[ProxyList]")) {
 					list = 1;
@@ -301,7 +310,7 @@ int connect(int sock, const struct sockaddr *addr, unsigned int len) {
 	socklen_t optlen = 0;
 	ip_type dest_ip;
 #ifdef DEBUG
-	char str[256];
+	//char str[256];
 #endif
 	struct in_addr *p_addr_in;
 	unsigned short port;

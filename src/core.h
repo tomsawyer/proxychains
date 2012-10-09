@@ -67,7 +67,8 @@ typedef enum {
 typedef enum {
 	HTTP_TYPE,
 	SOCKS4_TYPE,
-	SOCKS5_TYPE
+	SOCKS5_TYPE,
+	EXTERN_TYPE
 } proxy_type;
 
 typedef enum {
@@ -100,6 +101,10 @@ typedef struct {
 	proxy_state ps;
 	char user[256];
 	char pass[256];
+
+	unsigned short fixed;
+	char program[256];
+	unsigned short filled;
 } proxy_data;
 
 int connect_proxy_chain (int, ip_type, unsigned short, proxy_data *, unsigned int,
@@ -142,10 +147,15 @@ void proxy_getservbyname(const char *, struct servent *, char *, size_t, struct 
 int proxy_getaddrinfo(const char *, const char *, const struct addrinfo *, struct addrinfo **);
 void proxy_freeaddrinfo(struct addrinfo *);
 
-#ifdef DEBUG
+#ifndef DEBUG
 # define PDEBUG(fmt, args...) do { fprintf(stderr,"DEBUG:"fmt, ## args); fflush(stderr); } while(0)
 #else
 # define PDEBUG(fmt, args...) do {} while (0)
+//#define TRACE
+//#define TRACE_INT(x)
 #endif
+
+#define TRACE printf("\n		line: %s, %d\n", __FILE__, __LINE__);
+#define TRACE_INT(x) printf("\n		line: %s, %d, val: %d\n", __FILE__, __LINE__, x);
 
 #endif

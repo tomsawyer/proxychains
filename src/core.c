@@ -36,6 +36,8 @@
 #include <stdarg.h>
 #include <assert.h>
 
+#include <sys/file.h>
+
 #ifdef THREAD_SAFE
 pthread_mutex_t internal_ips_lock;
 
@@ -47,6 +49,26 @@ pthread_mutex_t internal_getsrvbyname_lock;
 
 #include "core.h"
 #include "common.h"
+
+typedef struct slock {
+	char *fname;
+	int fd;
+} slock_t;
+
+void slock(slock_t *lock)
+{
+	lock->fd = open(lock->fname, O_CREAT|O_WRONLY, 0666);
+	flock(lock->fd, LOCK_EX);
+}
+
+void sunlock(slock_t *lock)
+{
+	close(lock->fd);
+	unlink(lock->fname);
+}
+
+static slock_t lock = {"px.lock",-1};
+
 
 extern int tcp_read_time_out;
 extern int tcp_connect_time_out;
@@ -473,6 +495,8 @@ static int tunnel_to(int sock, ip_type ip, unsigned short port, proxy_type pt, c
 				return SUCCESS;
 			}
 			break;
+		case EXTERN_TYPE:
+			break;
 	}
 
 	err:
@@ -514,12 +538,80 @@ static int start_chain(int *fd, proxy_data * pd, char *begin_mark) {
 	return SOCKET_ERROR;
 }
 
+//TODO error processing
+static proxy_data *get_proxy(char *programm)
+{
+	FILE *inp;
+	proxy_data *pd = 0;
+
+	if(!programm)
+		goto error;
+
+	//printf("using prg: {%s}\n", programm);
+
+	char cmd[sizeof("LD_PRELOAD= ")+256];
+
+	snprintf(cmd,sizeof(cmd),"LD_PRELOAD= %s", programm);
+
+	//printf("using prg: {%s}\n", cmd);
+
+	if( !(inp=popen(cmd ,"r" )) ) {
+		goto error;
+	}
+
+	pd = malloc(sizeof(proxy_data));
+	bzero(pd, sizeof(proxy_data));
+
+	char buf[512];bzero(buf, sizeof(buf));
+
+	char * r = fgets(buf, sizeof buf, inp);
+
+	pclose(inp);
+
+	if(r == NULL)
+		goto error;
+
+	char type[512];
+	char host[512];
+	int port;
+
+	//printf("{%s}\n", buf);
+	sscanf(buf, "%s %s %d", type, host, &port);
+
+	if(!strcmp(type,"NONE")) {
+		return 0;
+	}
+
+	//printf("buf: [%s], h: [%s], p: [%d]\n", buf, host, port);
+
+	pd->pt = SOCKS5_TYPE; //TODO
+	pd->ip.as_int = inet_addr(host);
+	pd->port = htons((unsigned short)port);
+	pd->ps = PLAY_STATE;
+	pd->fixed = 0;
+	pd->filled = 1;
+	strcpy(pd->program, programm);
+
+	return pd;
+
+error:
+
+	free(pd);
+	return NULL;
+}
+
+void copy_data_to(proxy_data *dst, proxy_data *src)
+{
+	*dst = *src;
+	free(src);
+}
 
 static proxy_data *select_proxy(select_type how, proxy_data * pd, unsigned int proxy_count, unsigned int *offset) {
 	unsigned int i = 0, k = 0;
 
 	if(*offset >= proxy_count)
 		return NULL;
+
 	switch (how) {
 		case RANDOMLY:
 			srand((unsigned int)time(NULL));
@@ -531,15 +623,36 @@ static proxy_data *select_proxy(select_type how, proxy_data * pd, unsigned int p
 		case FIFOLY:
 			for(i = *offset; i < proxy_count; i++) {
 				if(pd[i].ps == PLAY_STATE) {
-					*offset = i;
+
+					if(pd[i].fixed == 0 && pd[i].filled == 0) {
+
+						//printf("A socks struct need to be filled\n");
+
+						printf("... E* "); fflush(stdout);
+
+						proxy_data *new = get_proxy(pd[i].program);
+
+						if(new) {
+							copy_data_to(&pd[i], new);
+							printf("... E+ "); fflush(stdout);
+							//printf("Socks struct has been filled\n");
+						} else {
+							printf("You are out of external proxies :C\n");
+							fgetc(stdin);
+							return NULL;
+							//continue;
+						}
+						*offset=i;
+					}
 					break;
 				}
+
 			}
 		default:
 			break;
 	}
 	if(i >= proxy_count)
-		i = 0;
+		i = proxy_count-1;
 	return (pd[i].ps == PLAY_STATE) ? &pd[i] : NULL;
 }
 
@@ -649,26 +762,84 @@ int connect_proxy_chain(int sock, ip_type target_ip,
 		case STRICT_TYPE:
 			calc_alive(pd, proxy_count);
 			offset = 0;
+
+			// 1
 			if(!(p1 = select_proxy(FIFOLY, pd, proxy_count, &offset))) {
 				PDEBUG("select_proxy failed\n");
 				goto error_strict;
 			}
+
+again_p1:
 			if(SUCCESS != start_chain(&ns, p1, ST)) {
 				PDEBUG("start_chain failed\n");
+
+				if(p1->fixed == 0) {
+					proxy_data *d = get_proxy(p1->program);
+
+					if(d) {
+						copy_data_to(p1, d);
+						printf("A new socks received 1.");
+						goto again_p1;
+					} else {
+						//
+					}
+				}
+
 				goto error_strict;
 			}
-			while(offset < proxy_count) {
-				if(!(p2 = select_proxy(FIFOLY, pd, proxy_count, &offset)))
+			do {
+				// 2 3 ...
+				if(!(p2 = select_proxy(FIFOLY, pd, proxy_count, &offset))) {
+					goto error_strict;
 					break;
+				}
+
+				proxy_data sv;
+again_p2:
+				sv = *p2;
+
 				if(SUCCESS != chain_step(ns, p1, p2)) {
 					PDEBUG("chain_step failed\n");
+
+					if(sv.fixed == 0) {
+						slock(&lock);
+
+						if(p2->ip.as_int == sv.ip.as_int) {
+
+							printf("need being updated\n");
+							proxy_data *d = get_proxy(sv.program);
+
+							if(d) {
+
+								copy_data_to(p2, d);
+
+								printf("A new socks received 2.");
+								offset=0;
+
+								sunlock(&lock);
+								goto again_p2;
+							}
+
+						} else{
+							printf("already new\n");
+							sunlock(&lock);
+							goto again_p2;
+						}
+
+						sunlock(&lock);
+					}
+
 					goto error_strict;
+
+				} else {
+					p2->ps=BUSY_STATE;
 				}
 				p1 = p2;
-			}
+			} while(offset < proxy_count-1);
 			//proxychains_write_log(TP);
 			p3->ip = target_ip;
 			p3->port = target_port;
+
 			if(SUCCESS != chain_step(ns, p1, p3))
 				goto error;
 			break;
@@ -743,6 +914,10 @@ struct hostent *proxy_gethostbyname(const char *name, struct gethostbyname_data*
 		data->resolved_addr = inet_addr(buff);
 		if(data->resolved_addr == (in_addr_t) (-1))
 			data->resolved_addr = (in_addr_t) (local_host.as_int);
+
+			data->hostent_space.h_name = strdup(name); //it's a memory leak I think
+			data->hostent_space.h_length = sizeof (in_addr_t);
+			data->hostent_space.h_addrtype = AF_INET;
 		return &data->hostent_space;
 	}
 
@@ -809,6 +984,8 @@ struct hostent *proxy_gethostbyname(const char *name, struct gethostbyname_data*
 
 	data->hostent_space.h_name = data->addr_name;
 	data->hostent_space.h_length = sizeof(in_addr_t);
+	data->hostent_space.h_addrtype = AF_INET;
+
 	return &data->hostent_space;
 
 	err_plus_unlock:
