@@ -621,17 +621,22 @@ static proxy_data *select_proxy(select_type how, proxy_data * pd, unsigned int p
 			} while(pd[i].ps != PLAY_STATE && k < proxy_count * 100);
 			break;
 		case FIFOLY:
-			for(i = *offset; i < proxy_count; i++) {
-				if(pd[i].ps == PLAY_STATE) {
 
-					if(pd[i].fixed == 0 && pd[i].filled == 0) {
+			/*find a free and working proxy from the list, starting from offset*/
+			for(i = *offset; i < proxy_count; i++) {
+				if(pd[i].ps == PLAY_STATE) { //if it's free
+
+					if(pd[i].fixed == 0 && pd[i].filled == 0) { // if it's an external loaded proxy
 
 						//printf("A socks struct need to be filled\n");
 
 						printf("... E* "); fflush(stdout);
 
+//try_again:
+						//get it
 						proxy_data *new = get_proxy(pd[i].program);
 
+						//check if a new proxy has been received
 						if(new) {
 							copy_data_to(&pd[i], new);
 							printf("... E+ "); fflush(stdout);
@@ -642,18 +647,27 @@ static proxy_data *select_proxy(select_type how, proxy_data * pd, unsigned int p
 							return NULL;
 							//continue;
 						}
-						*offset=i;
 					}
-					break;
+					*offset = i+1; //set the offset
+					break; //we found it!
 				}
 
 			}
 		default:
 			break;
 	}
+
+	// if we are out of ranges, go to the beginning of the list
 	if(i >= proxy_count)
-		i = proxy_count-1;
-	return (pd[i].ps == PLAY_STATE) ? &pd[i] : NULL;
+		i = 0;
+
+	//return (pd[i].ps == PLAY_STATE) ? &pd[i] : NULL;
+
+	if(pd[i].ps == PLAY_STATE) {
+		return &pd[i];
+	}else {
+		return NULL;
+	}
 }
 
 
@@ -762,32 +776,41 @@ int connect_proxy_chain(int sock, ip_type target_ip,
 		case STRICT_TYPE:
 			calc_alive(pd, proxy_count);
 			offset = 0;
-
-			// 1
+			// select the first proxy
 			if(!(p1 = select_proxy(FIFOLY, pd, proxy_count, &offset))) {
 				PDEBUG("select_proxy failed\n");
 				goto error_strict;
 			}
 
 again_p1:
+			//try to connect to it
 			if(SUCCESS != start_chain(&ns, p1, ST)) {
+				// if the proxy is dead
 				PDEBUG("start_chain failed\n");
 
+				// if the proxy is a loaded one
 				if(p1->fixed == 0) {
+					slock(&lock);
 					proxy_data *d = get_proxy(p1->program);
 
 					if(d) {
 						copy_data_to(p1, d);
+						sunlock(&lock);
+
 						printf("A new socks received 1.");
 						goto again_p1;
 					} else {
-						//
-					}
-				}
 
-				goto error_strict;
+						sunlock(&lock);
+						goto error_strict;
+					}
+				} else {
+					goto error_strict;
+				}
 			}
-			do {
+
+			// connect the rest of proxies to a chain
+			while(offset < proxy_count) {
 				// 2 3 ...
 				if(!(p2 = select_proxy(FIFOLY, pd, proxy_count, &offset))) {
 					goto error_strict;
@@ -799,6 +822,7 @@ again_p2:
 				sv = *p2;
 
 				if(SUCCESS != chain_step(ns, p1, p2)) {
+					// if the proxy is dead,
 					PDEBUG("chain_step failed\n");
 
 					if(sv.fixed == 0) {
@@ -810,9 +834,7 @@ again_p2:
 							proxy_data *d = get_proxy(sv.program);
 
 							if(d) {
-
 								copy_data_to(p2, d);
-
 								printf("A new socks received 2.");
 								offset=0;
 
@@ -832,10 +854,11 @@ again_p2:
 					goto error_strict;
 
 				} else {
+					//set the proxy busy
 					p2->ps=BUSY_STATE;
 				}
 				p1 = p2;
-			} while(offset < proxy_count-1);
+			}
 			//proxychains_write_log(TP);
 			p3->ip = target_ip;
 			p3->port = target_port;
@@ -882,6 +905,8 @@ again_p2:
 	error_more:
 	proxychains_write_log("\n!!!need more proxies!!!\n");
 	error_strict:
+
+	printf("error\n");
 	PDEBUG("error\n");
 
 	release_all(pd, proxy_count);
