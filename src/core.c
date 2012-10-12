@@ -47,8 +47,10 @@ pthread_mutex_t internal_getsrvbyname_lock;
 
 #endif /* THREAD_SAFE */
 
+#include "logger.h"
 #include "core.h"
 #include "common.h"
+
 
 typedef struct slock {
 	char *fname;
@@ -553,7 +555,7 @@ static proxy_data *get_proxy(char *programm)
 
 	snprintf(cmd,sizeof(cmd),"LD_PRELOAD= %s", programm);
 
-	//printf("using prg: {%s}\n", cmd);
+	printf("using prg: {%s}\n", cmd);
 
 	if( !(inp=popen(cmd ,"r" )) ) {
 		goto error;
@@ -588,8 +590,9 @@ static proxy_data *get_proxy(char *programm)
 	pd->ip.as_int = inet_addr(host);
 	pd->port = htons((unsigned short)port);
 	pd->ps = PLAY_STATE;
-	pd->fixed = 0;
 	pd->filled = 1;
+	pd->ext = 1;
+
 	strcpy(pd->program, programm);
 
 	return pd;
@@ -609,8 +612,9 @@ void copy_data_to(proxy_data *dst, proxy_data *src)
 static proxy_data *select_proxy(select_type how, proxy_data * pd, unsigned int proxy_count, unsigned int *offset) {
 	unsigned int i = 0, k = 0;
 
-	if(*offset >= proxy_count)
+	if(*offset >= proxy_count) {
 		return NULL;
+	}
 
 	switch (how) {
 		case RANDOMLY:
@@ -626,30 +630,25 @@ static proxy_data *select_proxy(select_type how, proxy_data * pd, unsigned int p
 			for(i = *offset; i < proxy_count; i++) {
 				if(pd[i].ps == PLAY_STATE) { //if it's free
 
-					if(pd[i].fixed == 0 && pd[i].filled == 0) { // if it's an external loaded proxy
-
-						//printf("A socks struct need to be filled\n");
+					if(pd[i].ext == 1 && pd[i].filled == 0) { // if it's an external loaded proxy
 
 						printf("... E* "); fflush(stdout);
-
-//try_again:
-						//get it
 						proxy_data *new = get_proxy(pd[i].program);
 
 						//check if a new proxy has been received
 						if(new) {
 							copy_data_to(&pd[i], new);
 							printf("... E+ "); fflush(stdout);
-							//printf("Socks struct has been filled\n");
 						} else {
 							printf("You are out of external proxies :C\n");
 							fgetc(stdin);
 							return NULL;
-							//continue;
 						}
 					}
 					*offset = i+1; //set the offset
 					break; //we found it!
+				} else {
+					printf("busy\n");
 				}
 
 			}
@@ -735,16 +734,22 @@ static int chain_step(int ns, proxy_data * pfrom, proxy_data * pto) {
 int connect_proxy_chain(int sock, ip_type target_ip,
 			unsigned short target_port, proxy_data * pd,
 			unsigned int proxy_count, chain_type ct, unsigned int max_chain) {
+
 	proxy_data p4;
 	proxy_data *p1, *p2, *p3;
+
 	int ns = -1;
 	unsigned int offset = 0;
 	unsigned int alive_count = 0;
 	unsigned int curr_len = 0;
 
+	chain_st *this_chain = new_chain(target_ip.as_int, target_port);
+	new_chain_event(this_chain);
+
 	p3 = &p4;
 
 	PDEBUG("connect_proxy_chain\n");
+	printf("new chain: %s\n", this_chain->id);
 
 	again:
 
@@ -779,6 +784,11 @@ int connect_proxy_chain(int sock, ip_type target_ip,
 			// select the first proxy
 			if(!(p1 = select_proxy(FIFOLY, pd, proxy_count, &offset))) {
 				PDEBUG("select_proxy failed\n");
+
+				printf("select_proxy failed\n");
+				TRACE
+
+				select_proxy_failed_event(this_chain);
 				goto error_strict;
 			}
 
@@ -787,45 +797,65 @@ again_p1:
 			if(SUCCESS != start_chain(&ns, p1, ST)) {
 				// if the proxy is dead
 				PDEBUG("start_chain failed\n");
+				printf("start_chain failed\n");
 
-				// if the proxy is a loaded one
-				if(p1->fixed == 0) {
+				chain_step_event(this_chain, EVENT_TIMEOUT, p1->pt, p1->ip.as_int, p1->port);
+
+				// if the proxy is a loaded one, and timeouts limit is exceed
+				if(p1->ext == 1 && p1->timeouts == 3) {
+					// to to get a new proxy
 					slock(&lock);
 					proxy_data *d = get_proxy(p1->program);
 
 					if(d) {
 						copy_data_to(p1, d);
 						sunlock(&lock);
-
 						printf("A new socks received 1.");
 						goto again_p1;
 					} else {
 
+						//we are out of fresh proxies
 						sunlock(&lock);
+						out_of_proies_event(this_chain);
+						TRACE
 						goto error_strict;
 					}
 				} else {
-					goto error_strict;
+					//add timeouts to the proxy statistic and try again
+					p1->timeouts++;
+					TRACE
+					goto again_p1;
+					//goto error_strict;
 				}
+			} else {
+				// this proxy is ok even if it timeouted before
+				p1->timeouts = 0;
+				chain_step_event(this_chain, EVENT_CONNECTING, p1->pt, p1->ip.as_int, p1->port);
 			}
 
 			// connect the rest of proxies to a chain
 			while(offset < proxy_count) {
 				// 2 3 ...
+				int g = offset;
 				if(!(p2 = select_proxy(FIFOLY, pd, proxy_count, &offset))) {
+					printf("select_proxy p2, %d\n", g);
+					select_proxy_failed_event(this_chain);
 					goto error_strict;
 					break;
 				}
 
 				proxy_data sv;
-again_p2:
+//again_p2:
 				sv = *p2;
 
 				if(SUCCESS != chain_step(ns, p1, p2)) {
 					// if the proxy is dead,
 					PDEBUG("chain_step failed\n");
+					printf("chain_step failed\n");
 
-					if(sv.fixed == 0) {
+					chain_step_event(this_chain, EVENT_TIMEOUT, p2->pt, p2->ip.as_int, p2->port);
+
+					if(sv.ext == 1 && sv.timeouts == 3) {
 						slock(&lock);
 
 						if(p2->ip.as_int == sv.ip.as_int) {
@@ -839,23 +869,34 @@ again_p2:
 								offset=0;
 
 								sunlock(&lock);
-								goto again_p2;
+
+								//try again the whole chain
+								goto again_p1;
 							}
 
 						} else{
 							printf("already new\n");
 							sunlock(&lock);
-							goto again_p2;
+
+							//try again the whole chain
+							goto again_p1;
 						}
 
 						sunlock(&lock);
+					} else {
+						//try again the whole chain
+						goto again_p1;
+						p2->timeouts++;
 					}
 
+					TRACE
 					goto error_strict;
 
 				} else {
 					//set the proxy busy
 					p2->ps=BUSY_STATE;
+					p2->timeouts = 0;
+					chain_step_event(this_chain, EVENT_CONNECTING, p2->pt, p2->ip.as_int, p2->port);
 				}
 				p1 = p2;
 			}
@@ -863,8 +904,15 @@ again_p2:
 			p3->ip = target_ip;
 			p3->port = target_port;
 
-			if(SUCCESS != chain_step(ns, p1, p3))
+			chain_connectin_target_event(this_chain);
+
+			if(SUCCESS != chain_step(ns, p1, p3)) {
+				chain_cant_connect_event(this_chain);
 				goto error;
+			}
+			else
+				chain_connected_event(this_chain);
+
 			break;
 
 		case RANDOM_TYPE:
@@ -904,9 +952,10 @@ again_p2:
 
 	error_more:
 	proxychains_write_log("\n!!!need more proxies!!!\n");
-	error_strict:
 
-	printf("error\n");
+error_strict:
+
+	printf("error_strict error\n");
 	PDEBUG("error\n");
 
 	release_all(pd, proxy_count);

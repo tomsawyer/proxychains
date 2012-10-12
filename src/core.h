@@ -15,6 +15,8 @@
  ***************************************************************************/
 
 #include <stdint.h>
+#include <netdb.h>
+#include <sys/socket.h>
 
 #ifndef __CORE_HEADER
 #define __CORE_HEADER
@@ -102,9 +104,10 @@ typedef struct {
 	char user[256];
 	char pass[256];
 
-	unsigned short fixed;
+	unsigned short ext;
 	char program[256];
 	unsigned short filled;
+	unsigned short timeouts;
 } proxy_data;
 
 int connect_proxy_chain (int, ip_type, unsigned short, proxy_data *, unsigned int,

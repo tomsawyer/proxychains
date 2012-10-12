@@ -36,6 +36,7 @@
 
 #include "core.h"
 #include "common.h"
+#include "logger.h"
 
 #define     satosin(x)      ((struct sockaddr_in *) &(x))
 #define     SOCKADDR(x)     (satosin(x)->sin_addr.s_addr)
@@ -111,6 +112,9 @@ static void do_init(void) {
 	SETUP_SYM(freeaddrinfo);
 	SETUP_SYM(gethostbyaddr);
 	SETUP_SYM(getnameinfo);
+
+	init_logger();
+
 	init_l = 1;
 }
 
@@ -196,7 +200,7 @@ static void get_chain_data(proxy_data * pd, unsigned int *proxy_count, chain_typ
 				memset(&pd[count], 0, sizeof(proxy_data));
 
 				pd[count].ps = PLAY_STATE;
-				pd[count].fixed = 1;
+				pd[count].ext = 0;
 				port_n = 0;
 
 				sscanf(buff, "%s %s %d %s %s", type, host, &port_n, pd[count].user, pd[count].pass);
@@ -212,7 +216,7 @@ static void get_chain_data(proxy_data * pd, unsigned int *proxy_count, chain_typ
 					pd[count].pt = SOCKS5_TYPE;
 				} else if(!strcmp(type,"extern")) {
 					pd[count].pt = EXTERN_TYPE;
-					pd[count].fixed = 0;
+					pd[count].ext = 1;
 					pd[count].filled = 0;
 					strcpy(pd[count].program, host);
 				}

@@ -15,7 +15,7 @@ bindir = $(exec_prefix)/bin
 
 SRCS = $(sort $(wildcard src/*.c))
 OBJS = $(SRCS:.c=.o)
-LOBJS = src/core.o src/common.o src/libproxychains.o
+LOBJS = src/core.o src/common.o src/logger.o src/libproxychains.o
 
 CCFLAGS  = -Wall -O0 -g -std=c99 -D_GNU_SOURCE -pipe -DTHREAD_SAFE -Werror -DDEBUG
 LDFLAGS = -shared -Wl,--no-as-needed -fPIC -pthread -ldl
@@ -35,7 +35,8 @@ LDSO_PATHNAME = libproxychains4.$(LDSO_SUFFIX)
 SHARED_LIBS = $(LDSO_PATHNAME)
 ALL_LIBS = $(SHARED_LIBS)
 PXCHAINS = proxychains4
-ALL_TOOLS = $(PXCHAINS)
+PXMONITOR = proxychains4monitor
+ALL_TOOLS = $(PXCHAINS) $(PXMONITOR)
 
 CCFLAGS+=$(USER_CFLAGS) $(MAC_CFLAGS)
 LDFLAGS+=$(USER_LDFLAGS) $(MAC_LDFLAGS)
@@ -67,5 +68,6 @@ $(LDSO_PATHNAME): $(LOBJS)
 
 $(ALL_TOOLS): $(OBJS)
 	$(CC) src/main.o src/common.o -o $(PXCHAINS)
+	$(CC) src/proxychains4monitor.o -o $(PXMONITOR) -lncurses
 
 .PHONY: all clean install install-config
