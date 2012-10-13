@@ -19,87 +19,90 @@
 
 #include "uthash/uthash.h"
 #include "logger.h"
+#include "proxychains4monitor.h"
 
 #define SOCK_PATH "/tmp/px.sock"
+#define NCURS 1
 
-#define MAXRECSTRLEN sizeof(" -> 123.123.123.123")*(MAXPROXIES+1)+32
-#define BUF_SIZE 256
+record_t *records = NULL;
+int total_recs = 0;
 
-typedef struct record{
-	char id[IDCHAINSIZE+1];
-	int no;
+int events_stats[12];
+int chain_length_stats[MAXPROXIES];
 
-	chain_st chain;
-
-	char *name_ptr;
-	char *descr_ptr;
-
-	time_t time_added;
-
-	UT_hash_handle hh;
-} record_t;
-
-char *status_str(int id) {
-	switch(id) {
-	case EVENT_FAILED: return "EVENT_FAILED";
-	case EVENT_CONNECTING: return "EVENT_CONNECTING";
-	case EVENT_DISCONNECTED: return "EVENT_DISCONNECTED";
-	case EVENT_OUTOFPROXIES: return "EVENT_OUT_OF_PROXIES";
-	case EVENT_SELECTFAILED: return "EVENT_SELECT_FAILED";
-	case EVENT_SOME_ERROR: return "EVENT_SOME_ERROR";
-	case EVENT_SUCCEED: return "EVENT_SUCCEED";
-	case EVENT_TIMEOUT: return "EVENT_TIMEOUT";
-	case EVENT_AGAIN: return "EVENT_AGAIN";
-	case EVENT_TARGET_CONNECTING: return "EVENT_TARGET_CONNECTING";
-	default: return "wut?";
-	}
-}
-
-void ncurses_init_colors() {
-
-	init_pair(EVENT_SUCCEED+1, COLOR_GREEN, COLOR_BLACK);
-	init_pair(EVENT_CONNECTING+1, COLOR_YELLOW, COLOR_BLACK);
-	init_pair(EVENT_FAILED+1, COLOR_RED, COLOR_BLACK);
-	init_pair(EVENT_TARGET_CONNECTING+1, COLOR_YELLOW, COLOR_BLACK);
-
-	init_pair(EVENT_DISCONNECTED+1, COLOR_WHITE, COLOR_BLACK); //XXX not implanted
-	init_pair(EVENT_OUTOFPROXIES+1, COLOR_BLACK, COLOR_RED);
-	init_pair(EVENT_SELECTFAILED+1, COLOR_BLACK, COLOR_RED);
-	init_pair(EVENT_SOME_ERROR+1, COLOR_RED, COLOR_BLACK);
-	init_pair(EVENT_TIMEOUT+1, COLOR_WHITE, COLOR_RED);
-	init_pair(EVENT_AGAIN+1, COLOR_RED, COLOR_BLACK);
-}
-
-char *build_chain_string(const chain_st *rec, char *buf, int buf_size)
+// build a string that matches chain connection
+int build_chain_string(const chain_st *chain, char *buf, int buf_size)
 {
 	int i = 0;
 	int nPos = 0;
 	uint32_t addr;
 
-	proxy_st proxy = rec->proxies_row[i++];
+	char arrow[sizeof("->")];
+
+	proxy_st proxy = chain->proxies_vector[i++];
 
 	nPos = sprintf(buf, "you");
 
+	// XXX ntohs(port) ?
+	addr = chain->target_addr;
+	if(chain->event == EVENT_NEW_CONNECTION) {
+		nPos+=snprintf(buf+nPos, buf_size-nPos, " => [%s:%d]", inet_ntoa(*(struct in_addr*)&addr), ntohs(chain->target_port));
+		return nPos;
+	}
+
 	while(proxy.addr > 0) {
+
+		strcpy(arrow, "->");
+
 		addr = ntohl(proxy.addr);
-		nPos += snprintf(buf+nPos, buf_size-nPos, " -> %s:%d", inet_ntoa(*(struct in_addr*)&addr), ntohs(proxy.port));
-		proxy=rec->proxies_row[i++];
+		nPos += snprintf(buf+nPos, buf_size-nPos, " %s %s:%d", arrow, inet_ntoa(*(struct in_addr*)&addr), ntohs(proxy.port));
+
+		proxy=chain->proxies_vector[i++];
 	}
 
-	if(rec->status == EVENT_TARGET_CONNECTING || rec->status == EVENT_FAILED || rec->status == EVENT_SUCCEED) {
-		addr = ntohl(rec->target_addr);
-		nPos += snprintf(buf+nPos, buf_size, " => [%s:%d]", inet_ntoa(*(struct in_addr*)&addr), ntohs(rec->target_port));
+	//print target address info
+	if(chain->event == EVENT_TARGET_CONNECTING || chain->event == EVENT_FAILED || chain->event == EVENT_SUCCEED) {
+		addr = ntohl(chain->target_addr);
+		nPos += snprintf(buf+nPos, buf_size-nPos, " => [%s:%d]", inet_ntoa(*(struct in_addr*)&addr), ntohs(chain->target_port));
 	}
 
-	if(rec->status == EVENT_SELECTFAILED)
-		nPos+=snprintf(buf+nPos, buf_size, " ->");
-	snprintf(buf+nPos, buf_size, " (%s)", status_str(rec->status));
+	//
+	if(chain->event == EVENT_SELECT_FAILED)
+		nPos+=snprintf(buf+nPos, buf_size-nPos, " ->");
 
+	snprintf(buf+nPos, buf_size-nPos, " (%s) (%s)", status_str(chain->event), chain->info);
+
+	return nPos;
+}
+
+int chain_length(chain_st *chain) {
+	int i = 0;
+	for(;chain->proxies_vector[i].addr>0;i++);
+	return i;
+}
+
+int stats_process(chain_st *chain) {
+    events_stats[chain->event]++;
+
+    if(chain->event == EVENT_TARGET_CONNECTING)
+    	chain_length_stats[chain_length(chain)]++;
 	return 0;
 }
 
-record_t *records = NULL;
-int total_recs = 0;
+int stats_lengths_str(char *buf, int buf_size) {
+
+	int n = sizeof(chain_length_stats)/sizeof(chain_length_stats[0]);
+	int nPos = 0;
+
+	for(int i=0;i<n;i++) {
+		if(chain_length_stats[i] > 0)
+			nPos+=snprintf(buf+nPos, buf_size-nPos, "%d[%d] ", i, chain_length_stats[i]);
+	}
+
+	return nPos;
+}
+
+//TODO different sort functions
 
 int uthash_sort_by_time(record_t *rec1, record_t *rec2) {
 	if(rec1->time_added==rec2->time_added)
@@ -130,7 +133,7 @@ void free_record(record_t *rec) {
 	free(rec);
 }
 
-void add_new_record(chain_st chain) {
+record_t *add_new_record(chain_st chain) {
 
 	record_t *old = NULL;
 	record_t *new = NULL;
@@ -148,18 +151,19 @@ void add_new_record(chain_st chain) {
 
 	HASH_ADD_STR(records, id, new);
 	HASH_SORT(records,uthash_sort_by_time);
-}
 
-#define NCURS 1
+	return new;
+}
 
 int main(int argc, char ** argv)
 {
 	struct sockaddr_un srvr_name, rcvr_name;
-	//char buf[BUF_SIZE];
+
 	int   sock;
 	socklen_t   namelen;
 	int bytes = 0;
-	int rows;
+	int rows = 50;
+	bzero(events_stats, sizeof(events_stats));
 
 	unlink(SOCK_PATH);
 
@@ -199,28 +203,44 @@ int main(int argc, char ** argv)
 	while(1) {
 		chain_st chain;
 
-
 		bytes = recvfrom(sock, &chain, sizeof(chain),  0, &rcvr_name, &namelen);
 
 		if (bytes < 0) {
 			perror("recvfrom failed");
 			return EXIT_FAILURE;
 		}
+#if NCURS
 	    erase();
-
+#else
+	    system ( "clear" );
+#endif
         add_new_record( chain );
+        stats_process(&chain);
 
 		record_t *rec = (record_t*)NULL;
 		int row = 0;
-	    for(rec = records; rec != NULL && row<rows; rec=rec->hh.next, row++) {
+	    for(rec = records; rec != NULL && row<rows-5; rec=rec->hh.next, row++) {
 #if NCURS
-	    	attron( COLOR_PAIR( rec->chain.status+1 ) );
+	    	attron( COLOR_PAIR( rec->chain.event+1 ) );
 	    	printw("(%d) %s\n",rec->no, rec->descr_ptr);
 #else
 	    	printf("(%d) %s\n",rec->no, rec->descr_ptr);
 #endif
 	    	//attroff( COLOR_PAIR( rec->chain.status+1 ) );
 	    }
+
+	    attron( COLOR_PAIR( EVENT_SUCCEED+1) );
+	    char len_stats[256];
+	    len_stats[0] = '\0';
+
+	    stats_lengths_str(len_stats, sizeof(len_stats));
+
+	    mvprintw(rows-2,0,"events [success: %d]\t[select_failed: %d]\t[timeouts: %d]\t[chain retries: %d]\t[dead: %d]",
+	    		events_stats[EVENT_SUCCEED], events_stats[EVENT_SELECT_FAILED],
+	    		events_stats[EVENT_TIMEOUT], events_stats[EVENT_AGAIN],
+	    		events_stats[EVENT_DEAD_PROXY]);
+	    mvprintw(rows-1,0,"chain lengths: %s", len_stats);
+
 	    refresh();
 	}
 

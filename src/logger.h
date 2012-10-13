@@ -5,31 +5,35 @@
 #define IDCHAINSIZE 16
 
 typedef struct proxy_struct{
-	int type;
+	unsigned short type;
 	uint32_t addr;
 	unsigned short port;
 } proxy_st;
 
 enum {
+	EVENT_NEW_CONNECTION,
 	EVENT_SUCCEED,
 	EVENT_CONNECTING,
 	EVENT_TIMEOUT,
 	EVENT_DISCONNECTED,
-	EVENT_SELECTFAILED,
+	EVENT_SELECT_FAILED,
 	EVENT_FAILED,
 	EVENT_SOME_ERROR,
 	EVENT_OUTOFPROXIES,
 	EVENT_AGAIN,
-	EVENT_TARGET_CONNECTING
+	EVENT_TARGET_CONNECTING,
+	EVENT_DEAD_PROXY,
+	EVENT_EXTERN_LOAD
 };
 
 typedef struct chain_struct{
 	char id[IDCHAINSIZE+1];
+	char info[64];
 
 	uint32_t target_addr;
-	unsigned short int target_port;
-	proxy_st proxies_row[MAXPROXIES];
-	unsigned short status;
+	unsigned short target_port;
+	proxy_st proxies_vector[MAXPROXIES+1];
+	unsigned short event;
 } chain_st;
 
 int init_logger();
@@ -47,6 +51,9 @@ int select_proxy_failed_event(chain_st *chain);
 int chain_cant_connect_event(chain_st *chain);
 int send_event(chain_st *chain);
 int chain_connectin_target_event(chain_st *chain);
-int out_of_proies_event(chain_st *chain);
+int out_of_proxies_event(chain_st *chain);
+void chain_append_info(chain_st *chain, const char *fmt, ...);
+int dead_proxy_event(chain_st *chain);
+int extern_proxy_event(chain_st *chain);
 
 #endif /* LOGGER_H_ */

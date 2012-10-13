@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 
 #include <errno.h>
+#include <stdarg.h>
 
 #include "core.h"
 #include "logger.h"
@@ -56,9 +57,12 @@ char *random_id(char *buf, int buf_size) {
 chain_st *new_chain(uint32_t target_addr, unsigned short target_port) {
 	chain_st *ch=calloc(1, sizeof(*ch));
 	random_id(ch->id, IDCHAINSIZE+1);
-	ch->target_addr = target_addr;
-	ch->target_port = target_port;
-	ch->status = EVENT_CONNECTING;
+
+	ch->target_addr = htonl(target_addr);
+	ch->target_port = htons(target_port);
+
+	ch->event = EVENT_NEW_CONNECTION;
+	ch->info[0] = '\0';
 	return ch;
 }
 
@@ -66,33 +70,44 @@ void free_chain(chain_st *chain) {
 	free(chain);
 }
 
-int new_chain_event(chain_st *newchain) {
+int new_chain_event(chain_st *chain) {
+	chain->event = EVENT_NEW_CONNECTION;
+	_send_msg(chain, sizeof(*chain));
 	return 0;
 }
 
 int chain_step_event(chain_st *chain, int event, unsigned short proxy_type, uint32_t proxy_addr, unsigned short proxy_port) {
 
 	int i = 0;
-	for(;chain->proxies_row[i].addr>0;i++);
+	for(;chain->proxies_vector[i].addr>0;i++);
 
-	chain->proxies_row[i].type = htons(proxy_type);
-	chain->proxies_row[i].addr = htonl(proxy_addr);
-	chain->proxies_row[i].port = htons(proxy_port);
+	chain->proxies_vector[i].type = htons(proxy_type);
+	chain->proxies_vector[i].addr = htonl(proxy_addr);
+	chain->proxies_vector[i].port = proxy_port;
 
-	chain->status = event;
+	chain->event = event;
 
 	_send_msg(chain, sizeof(*chain));
 
 	return 0;
 }
 
+void chain_append_info(chain_st *chain, const char *fmt, ...) {
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(chain->info+strlen(chain->info), sizeof(chain->info)-strlen(chain->info), fmt, args);
+	va_end(args);
+}
+
 int chain_connected_event(chain_st *chain) {
-	chain->status = EVENT_SUCCEED;
+	chain->event = EVENT_SUCCEED;
 	_send_msg(chain, sizeof(*chain));
 	return 0;
 }
 
 int timeout_event(chain_st *chain) {
+	chain->event = EVENT_TIMEOUT;
+	_send_msg(chain, sizeof(*chain));
 	return 0;
 }
 
@@ -100,26 +115,38 @@ int disconnect_event(chain_st *chain) {
 	return 0;
 }
 
-int select_proxy_failed_event(chain_st *chain) {
-	chain->status = EVENT_SELECTFAILED;
+int dead_proxy_event(chain_st *chain){
+	chain->event = EVENT_DEAD_PROXY;
 	_send_msg(chain, sizeof(*chain));
 	return 0;
 }
 
-int out_of_proies_event(chain_st *chain) {
-	chain->status = EVENT_OUTOFPROXIES;
+int select_proxy_failed_event(chain_st *chain) {
+	chain->event = EVENT_SELECT_FAILED;
+	_send_msg(chain, sizeof(*chain));
+	return 0;
+}
+
+int out_of_proxies_event(chain_st *chain) {
+	chain->event = EVENT_OUTOFPROXIES;
 	_send_msg(chain, sizeof(*chain));
 	return 0;
 }
 
 int chain_cant_connect_event(chain_st *chain) {
-	chain->status = EVENT_FAILED;
+	chain->event = EVENT_FAILED;
+	_send_msg(chain, sizeof(*chain));
+	return 0;
+}
+
+int extern_proxy_event(chain_st *chain) {
+	chain->event = EVENT_EXTERN_LOAD;
 	_send_msg(chain, sizeof(*chain));
 	return 0;
 }
 
 int chain_connectin_target_event(chain_st *chain) {
-	chain->status = EVENT_TARGET_CONNECTING;
+	chain->event = EVENT_TARGET_CONNECTING;
 	_send_msg(chain, sizeof(*chain));
 	return 0;
 }
