@@ -110,6 +110,12 @@ typedef struct {
 	char program[256];
 	unsigned short filled;
 	unsigned short timeouts;
+
+#ifdef THREAD_SAFE
+	pthread_mutex_t update_lock;
+	pthread_cond_t update_cond;
+	unsigned short updating;
+#endif
 } proxy_data;
 
 int connect_proxy_chain (int, ip_type, unsigned short, proxy_data *, unsigned int,

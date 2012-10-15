@@ -37,6 +37,7 @@
 #include <assert.h>
 
 #include <sys/file.h>
+#include <time.h>
 
 #ifdef THREAD_SAFE
 
@@ -606,8 +607,44 @@ error:
 
 void copy_data_to(proxy_data *dst, proxy_data *src)
 {
+#ifdef THREAD_SAFE
+	src->update_lock = dst->update_lock;
+	src->update_cond = dst->update_cond;
+	src->updating = 1;
+#endif
 	*dst = *src;
 	free(src);
+}
+
+#define RECON	3
+
+int extern_update_proxy(proxy_data *px) {
+
+	int r = 0;
+	if(!pthread_mutex_trylock(&px->update_lock)) {
+		px->updating = 1;
+
+		proxy_data *d = get_proxy(px->program);
+
+		if(d) {
+			copy_data_to(px, d);
+			r = 0;
+		} else {
+			r = 1;
+		}
+
+		px->updating = 0;
+		pthread_cond_broadcast(&px->update_cond);
+		pthread_mutex_unlock(&px->update_lock);
+	} else {
+		pthread_mutex_lock(&px->update_lock);
+		 while (px->updating == 1)
+		        pthread_cond_wait(&px->update_cond, &px->update_lock);
+		 pthread_mutex_unlock(&px->update_lock);
+		 printf("going ahead\n");
+	}
+
+	return r;
 }
 
 static proxy_data *select_proxy(select_type how, proxy_data * pd, unsigned int proxy_count, unsigned int offset) {
@@ -635,11 +672,11 @@ static proxy_data *select_proxy(select_type how, proxy_data * pd, unsigned int p
 					if(pd[i].ext == 1 && pd[i].filled == 0) { // if it's an external loaded proxy and it hasn't loaded yet
 
 						printf("... E* "); fflush(stdout);
-						proxy_data *new = get_proxy(pd[i].program);
 
-						//check if a new proxy has been received
-						if(new) {
-							copy_data_to(&pd[i], new);
+						int res = extern_update_proxy(&pd[i]);
+
+						if(res == 0) {
+							return &pd[i];
 							printf("... E+ "); fflush(stdout);
 						} else {
 							printf("You are out of external proxies :C\n");
@@ -737,8 +774,8 @@ static int chain_step(int ns, proxy_data * pfrom, proxy_data * pto) {
 	return retcode;
 }
 
-#define RECON	30
-pthread_mutex_t chain_locks[MAXPROXIES];
+int connections;
+time_t interval;
 
 int connect_proxy_chain(int sock, ip_type target_ip,
 			unsigned short target_port, proxy_data * pd,
@@ -752,6 +789,9 @@ int connect_proxy_chain(int sock, ip_type target_ip,
 	//unsigned int chain_len = 0;
 	unsigned int alive_count = 0;
 	unsigned int curr_len = 0;
+
+	int chain_timeouts[MAXPROXIES];
+	bzero(chain_timeouts,sizeof(chain_timeouts));
 
 	//TODO free allocated memory
 	chain_st *this_chain = new_chain(target_ip.as_int, target_port);
@@ -819,64 +859,53 @@ again_p1:
 				timeout_event(this_chain);
 
 				// if the proxy is the loaded one, and timeouts limit is exceed
-				if(p1->ext == 1 && p1->timeouts >= RECON) {
-					// try to get a new proxy from an external program
-					extern_proxy_event(this_chain);
+				if(p1->timeouts >= RECON) {
 
-					/*
+					if(p1->ext == 1) {
+						// try to get a new proxy from an external program
+						extern_proxy_event(this_chain);
 
-					 if trylock
-					 	 get_proxy
-					 	 unlock
-					 else
-					 	 unlock
+						int res = extern_update_proxy(p1);
 
-					 */
-
-					proxy_data *d = get_proxy(p1->program);
-
-					if(d) {
-						// if success, replace previous proxy data with the new one
-						copy_data_to(p1, d);
-						// retry the chain
-						goto again_p1;
+						if(!res) {
+							printf("A new socks received 1.");
+							// retry the chain
+							chain_timeouts[offset] = 0;
+							goto again_p1;
+						} else {
+							printf("A new socks received 2.");
+							// we are out of fresh proxies
+							out_of_proxies_event(this_chain);
+							// end the connection
+							goto error_strict;
+						}
 					} else {
-						// we are out of fresh proxies
-						out_of_proxies_event(this_chain);
-						// end the connection
+						dead_proxy_event(this_chain);
 						goto error_strict;
 					}
 				} else {
 
-					if(p1->timeouts>=RECON) {
-						dead_proxy_event(this_chain);
-						goto error_strict;
+					if(chain_timeouts[offset] > RECON) {
+						p1->timeouts++;
+					} else {
+						chain_timeouts[offset]++;
 					}
-
-					//increment timeout count for the proxy and try the chain again
-					p1->timeouts++;
-					//chain_append_info(this_chain," retry");
-					//chain_step_event(this_chain, EVENT_AGAIN, p1->pt, p1->ip.as_int, p1->port);
 					goto again_p1;
 				}
 			} else {
 				// this proxy is ok even if it has timeouted before
-				p1->timeouts = 0;
+				chain_timeouts[offset] = 0;
 			}
 
 // connect the rest of proxies to a chain
 			while(offset < proxy_count) {
+
 				// try to select next PLAY_STATE proxy from proxy list, starting on offset
 				if(!(p2 = select_proxy(FIFOLY, pd, proxy_count, offset++))) {
 					chain_append_info( this_chain ,"c %d, off %d", proxy_count, offset);
 					select_proxy_failed_event(this_chain);
 					goto error_strict;
-					break;
 				}
-
-				proxy_data sv;
-
-				sv = *p2;
 
 				chain_step_event(this_chain, EVENT_CONNECTING, p2->pt, p2->ip.as_int, p2->port);
 
@@ -886,54 +915,36 @@ again_p1:
 
 					timeout_event(this_chain);
 
-					MUTEX_LOCK(&proxy_lock);
-					if(sv.ext == 1 && sv.timeouts >= RECON) {
-
-						//we must be sure that no thread will update this proxy after it was updated
-						if(p2->ip.as_int == sv.ip.as_int) {
-
-							printf("need being updated\n");
+					if(p2->timeouts >= RECON) {
+						if(p2->ext == 1) {
 							extern_proxy_event(this_chain);
-							proxy_data *d = get_proxy(sv.program);
+							int res = extern_update_proxy(p2);
 
-							if(d) {
-								copy_data_to(p2, d);
+							if(!res) {
 								printf("A new socks received 2.");
-
-								MUTEX_UNLOCK(&proxy_lock);
 								//try again the whole chain
+								chain_timeouts[offset] = 0;
 								goto again_p1;
+							} else {
+								out_of_proxies_event(this_chain);
+								goto error_strict;
 							}
-
-						} else{
-							printf("already new\n");
-
-							MUTEX_UNLOCK(&proxy_lock);
-							//try again the whole chain
-							goto again_p1;
-						}
-
-					} else {
-
-						MUTEX_UNLOCK(&proxy_lock);
-						if(p2->timeouts>=RECON) {
+						} else {
 							dead_proxy_event(this_chain);
 							goto error_strict;
 						}
+					} else {
 
-						//try again the whole chain
-						p2->timeouts++;
-						//chain_append_info(this_chain," retry");
-
+						if(chain_timeouts[offset] > RECON) {
+							p2->timeouts++;
+						} else {
+							chain_timeouts[offset]++;
+						}
 						goto again_p1;
 					}
 
-					goto error_strict;
-
 				} else {
-					//set the proxy busy
-					//p2->ps=BUSY_STATE;
-					p2->timeouts = 0;
+					chain_timeouts[offset]=0;
 				}
 				p1 = p2;
 			}

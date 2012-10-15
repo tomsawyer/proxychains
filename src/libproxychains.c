@@ -208,6 +208,12 @@ static void get_chain_data(proxy_data * pd, unsigned int *proxy_count, chain_typ
 				pd[count].ip.as_int = (uint32_t) inet_addr(host);
 				pd[count].port = htons((unsigned short) port_n);
 
+#ifdef THREAD_SAFE
+				MUTEX_INIT(&pd[count].update_lock, NULL);
+				pthread_cond_init(&pd[count].update_cond, NULL);
+				pd[count].updating = 0;
+#endif
+
 				if(!strcmp(type, "http")) {
 					pd[count].pt = HTTP_TYPE;
 				} else if(!strcmp(type, "socks4")) {

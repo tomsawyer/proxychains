@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <time.h>
+#include <utime.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -25,10 +26,17 @@
 #define NCURS 1
 
 record_t *records = NULL;
+record_t *events = NULL;
+
 int total_recs = 0;
+int total_events = 0;
 
 int events_stats[12];
 int chain_length_stats[MAXPROXIES];
+
+int new_conns = 0;
+time_t ptime = 0;
+int conns_rate = 0;
 
 // build a string that matches chain connection
 int build_chain_string(const chain_st *chain, char *buf, int buf_size)
@@ -82,10 +90,16 @@ int chain_length(chain_st *chain) {
 }
 
 int stats_process(chain_st *chain) {
+
+	time_t ctime = time(NULL);
+
     events_stats[chain->event]++;
 
     if(chain->event == EVENT_TARGET_CONNECTING)
     	chain_length_stats[chain_length(chain)]++;
+
+    ptime = time;
+
 	return 0;
 }
 
@@ -108,6 +122,12 @@ int uthash_sort_by_time(record_t *rec1, record_t *rec2) {
 	if(rec1->time_added==rec2->time_added)
 		return 0;
 	return (rec1->time_added>rec2->time_added) ? -1 : 1;
+}
+
+int uthash_sort_by_no(record_t *rec1, record_t *rec2) {
+	if(rec1->no==rec2->no)
+		return 0;
+	return (rec1->no>rec2->no) ? -1 : 1;
 }
 
 record_t *create_record(chain_st chain) {
@@ -154,6 +174,16 @@ record_t *add_new_record(chain_st chain) {
 
 	return new;
 }
+
+record_t *log_new_record(chain_st chain) {
+	record_t *new = create_record(chain);
+	new->no = total_events++;
+	HASH_ADD_INT(events,no, new);
+	HASH_SORT(events,uthash_sort_by_no);
+	return new;
+}
+
+#define EVENTS_LOG_ROWS 20
 
 int main(int argc, char ** argv)
 {
@@ -215,11 +245,12 @@ int main(int argc, char ** argv)
 	    system ( "clear" );
 #endif
         add_new_record( chain );
+        log_new_record(chain);
         stats_process(&chain);
 
 		record_t *rec = (record_t*)NULL;
 		int row = 0;
-	    for(rec = records; rec != NULL && row<rows-5; rec=rec->hh.next, row++) {
+	    for(rec = records; rec != NULL && row<rows - EVENTS_LOG_ROWS-1-5; rec=rec->hh.next, row++) {
 #if NCURS
 	    	attron( COLOR_PAIR( rec->chain.event+1 ) );
 	    	printw("(%d) %s\n",rec->no, rec->descr_ptr);
@@ -229,14 +260,23 @@ int main(int argc, char ** argv)
 	    	//attroff( COLOR_PAIR( rec->chain.status+1 ) );
 	    }
 
+	    printw("\n");
+
+	    for(row = 0, rec = events;rec!=NULL && row<EVENTS_LOG_ROWS; rec=rec->hh.next, row++) {
+	    	attron( COLOR_PAIR( rec->chain.event+1 ) );
+	    	printw("(%d) %s\n",rec->no, rec->descr_ptr);
+	    }
+
 	    attron( COLOR_PAIR( EVENT_SUCCEED+1) );
 	    char len_stats[256];
 	    len_stats[0] = '\0';
 
 	    stats_lengths_str(len_stats, sizeof(len_stats));
 
-	    mvprintw(rows-2,0,"events [success: %d]\t[select_failed: %d]\t[timeouts: %d]\t[chain retries: %d]\t[dead: %d]",
-	    		events_stats[EVENT_SUCCEED], events_stats[EVENT_SELECT_FAILED],
+	    mvprintw(rows-2,0,"events [success: %d]\t[failed: %d]\t[select_failed:"\
+	    		" %d]\t[timeouts: %d]\t[chain retries: %d]\t[dead: %d]",
+	    		events_stats[EVENT_SUCCEED], events_stats[EVENT_FAILED],
+	    		events_stats[EVENT_SELECT_FAILED],
 	    		events_stats[EVENT_TIMEOUT], events_stats[EVENT_AGAIN],
 	    		events_stats[EVENT_DEAD_PROXY]);
 	    mvprintw(rows-1,0,"chain lengths: %s", len_stats);

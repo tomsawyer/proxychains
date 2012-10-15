@@ -59,7 +59,7 @@ chain_st *new_chain(uint32_t target_addr, unsigned short target_port) {
 	random_id(ch->id, IDCHAINSIZE+1);
 
 	ch->target_addr = htonl(target_addr);
-	ch->target_port = htons(target_port);
+	ch->target_port = (target_port);
 
 	ch->event = EVENT_NEW_CONNECTION;
 	ch->info[0] = '\0';
